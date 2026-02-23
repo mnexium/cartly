@@ -9,7 +9,6 @@ struct ReceiptEntry: Identifiable, Codable, Sendable {
     let capturedAt: Date
     let rawText: String
     let mnexiumRecordID: String?
-    let imageData: Data?
 
     init(
         id: String = UUID().uuidString,
@@ -19,8 +18,7 @@ struct ReceiptEntry: Identifiable, Codable, Sendable {
         purchasedAt: Date,
         capturedAt: Date = Date(),
         rawText: String,
-        mnexiumRecordID: String? = nil,
-        imageData: Data? = nil
+        mnexiumRecordID: String? = nil
     ) {
         self.id = id
         self.storeName = storeName
@@ -30,30 +28,15 @@ struct ReceiptEntry: Identifiable, Codable, Sendable {
         self.capturedAt = capturedAt
         self.rawText = rawText
         self.mnexiumRecordID = mnexiumRecordID
-        self.imageData = imageData
     }
 }
 
-struct ParsedReceipt: Sendable {
+struct ReceiptItemEntry: Identifiable, Codable, Sendable {
+    let id: String
     let receiptID: String
-    let storeName: String
-    let total: Double
-    let currency: String
-    let purchaseDate: Date?
-    let items: [ParsedReceiptItem]
-}
-
-struct ParsedReceiptItem: Sendable {
     let itemName: String
     let quantity: Double?
     let unitPrice: Double?
     let lineTotal: Double?
     let category: String?
-}
-
-struct StoreSpendSummary: Identifiable {
-    let storeName: String
-    let total: Double
-
-    var id: String { storeName }
 }

@@ -84,6 +84,16 @@ struct MnexiumReceiptRecord: Sendable, Identifiable {
     let rawText: String
 }
 
+struct MnexiumReceiptItemRecord: Sendable, Identifiable {
+    let id: String
+    let receiptID: String
+    let itemName: String
+    let quantity: Double?
+    let unitPrice: Double?
+    let lineTotal: Double?
+    let category: String?
+}
+
 struct MnexiumRecordMutation: Sendable {
     let id: String?
     let table: String?
@@ -163,7 +173,11 @@ final class MnexiumClient {
                 history: true,
                 learn: true,
                 recall: true,
-                summarize: "balanced"
+                summarize: "balanced",
+                records: MnxRecordsContext(
+                    recall: true,
+                    tables: ["receipts", "receipt_items"]
+                )
             ),
             stream: nil
         )
@@ -199,7 +213,11 @@ final class MnexiumClient {
                     history: true,
                     learn: true,
                     recall: true,
-                    summarize: "balanced"
+                    summarize: "balanced",
+                    records: MnxRecordsContext(
+                        recall: true,
+                        tables: ["receipts", "receipt_items"]
+                    )
                 ),
                 stream: true
             )
@@ -268,6 +286,21 @@ final class MnexiumClient {
             ]
         )
         return try extractReceiptRecords(from: data)
+    }
+
+    func queryReceiptItems(subjectID: String, receiptID: String, limit: Int = 200) async throws -> [MnexiumReceiptItemRecord] {
+        _ = try nonEmpty(subjectID, field: "subject_id")
+        let normalizedReceiptID = try nonEmpty(receiptID, field: "receipt_id")
+        let normalizedLimit = max(1, min(limit, 500))
+
+        let request = RecordsQueryRequest(
+            where: ["receipt_id": normalizedReceiptID],
+            order_by: "item_name",
+            limit: normalizedLimit,
+            offset: nil
+        )
+        let data = try await send(path: "/api/v1/records/receipt_items/query", method: "POST", payload: request)
+        return try extractReceiptItemRecords(from: data)
     }
 
     func captureReceiptToRecords(imageJPEGData: Data, subjectID: String, chatID: String) async throws -> MnexiumRecordsSyncResult {
@@ -1048,6 +1081,37 @@ final class MnexiumClient {
         }
     }
 
+    private func extractReceiptItemRecords(from data: Data) throws -> [MnexiumReceiptItemRecord] {
+        let object = try JSONSerialization.jsonObject(with: data)
+        let sourceArray = findRecordArray(in: object)
+
+        return sourceArray.compactMap { item in
+            let recordID = firstNonEmptyString(from: item, keys: ["id", "record_id", "recordId"])
+            let payload = firstObject(in: item, keys: ["data", "record", "value"]) ?? item
+
+            let receiptID = firstNonEmptyString(from: payload, keys: ["receipt_id", "receiptId"])
+                ?? firstNonEmptyString(from: item, keys: ["receipt_id", "receiptId"])
+                ?? ""
+            guard !receiptID.isEmpty else { return nil }
+
+            let itemName = firstNonEmptyString(from: payload, keys: ["item_name", "itemName", "name"]) ?? "Unnamed Item"
+            let quantity = firstDouble(from: payload, keys: ["quantity", "qty"])
+            let unitPrice = firstDouble(from: payload, keys: ["unit_price", "unitPrice", "price"])
+            let lineTotal = firstDouble(from: payload, keys: ["line_total", "lineTotal", "total", "amount"])
+            let category = firstNonEmptyString(from: payload, keys: ["category"])
+
+            return MnexiumReceiptItemRecord(
+                id: recordID ?? "\(receiptID)-\(itemName)-\(UUID().uuidString.lowercased())",
+                receiptID: receiptID,
+                itemName: itemName,
+                quantity: quantity,
+                unitPrice: unitPrice,
+                lineTotal: lineTotal,
+                category: category
+            )
+        }
+    }
+
     private func extractRecordsSyncResult(from data: Data) throws -> MnexiumRecordsSyncResult {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw MnexiumClientError.parse("records sync response is not a JSON object")
@@ -1537,12 +1601,12 @@ private struct MnxContext: Encodable {
 }
 
 private struct MnxRecordsContext: Encodable {
-    let learn: String
+    let learn: String?
     let recall: Bool?
     let tables: [String]?
     let sync: Bool?
 
-    init(learn: String, recall: Bool? = nil, tables: [String]? = nil, sync: Bool? = nil) {
+    init(learn: String? = nil, recall: Bool? = nil, tables: [String]? = nil, sync: Bool? = nil) {
         self.learn = learn
         self.recall = recall
         self.tables = tables
@@ -1562,6 +1626,13 @@ private struct RecordsSchemaLegacyRequest: Encodable {
     let fields: [String: SchemaField]
     let subject_id: String
     let mnx: MnxContext
+}
+
+private struct RecordsQueryRequest: Encodable {
+    let `where`: [String: String]
+    let order_by: String?
+    let limit: Int?
+    let offset: Int?
 }
 
 private struct ReceiptSchema: Encodable {

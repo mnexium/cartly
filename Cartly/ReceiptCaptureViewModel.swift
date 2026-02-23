@@ -16,11 +16,12 @@ final class ReceiptCaptureViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var showingError = false
     @Published var infoMessage: String?
-    @Published var isMnexiumConfigured = false
-    @Published var configurationMessage = "Loading API keys..."
     @Published var receipts: [ReceiptEntry] = []
     @Published var isLoadingReceipts = false
     @Published var receiptsLoadMessage: String?
+    @Published var receiptItemsByReceiptID: [String: [ReceiptItemEntry]] = [:]
+    @Published var loadingReceiptItemIDs: Set<String> = []
+    @Published var receiptItemsLoadMessages: [String: String] = [:]
 
     private let identityStore: MnexiumIdentityStore
     private let secretsService: LambdaSecretsService?
@@ -40,8 +41,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
                 openAIKey: cachedSecrets.openaiApiKey
            ) {
             self.mnexiumClient = MnexiumClient(configuration: configuration)
-            self.isMnexiumConfigured = true
-            self.configurationMessage = "Mnexium connected (cached key)."
         }
 
         Task {
@@ -61,14 +60,11 @@ final class ReceiptCaptureViewModel: ObservableObject {
                 }
 
                 self.mnexiumClient = MnexiumClient(configuration: configuration)
-                self.isMnexiumConfigured = true
-                self.configurationMessage = "Mnexium connected."
                 await refreshReceipts(force: true)
                 return
             } catch {
                 logError(error, context: "secrets_refresh")
                 if mnexiumClient != nil {
-                    self.configurationMessage = "Mnexium connected (cached key)."
                     return
                 }
             }
@@ -76,13 +72,9 @@ final class ReceiptCaptureViewModel: ObservableObject {
 
         if let configuration = MnexiumConfiguration.fromEnvironment() {
             self.mnexiumClient = MnexiumClient(configuration: configuration)
-            self.isMnexiumConfigured = true
-            self.configurationMessage = "Mnexium connected (environment key)."
             await refreshReceipts(force: true)
         } else {
             self.mnexiumClient = nil
-            self.isMnexiumConfigured = false
-            self.configurationMessage = "Could not load Mnexium key from Lambda endpoint."
         }
     }
 
@@ -91,10 +83,7 @@ final class ReceiptCaptureViewModel: ObservableObject {
 
         isProcessing = true
         infoMessage = nil
-
-        defer {
-            isProcessing = false
-        }
+        defer { isProcessing = false }
 
         do {
             guard let mnexiumClient else {
@@ -107,21 +96,16 @@ final class ReceiptCaptureViewModel: ObservableObject {
             }
             logger.info("context=receipt_ocr_image_prepared bytes=\(compressedImageData.count)")
 
-            do {
-                let syncResult = try await mnexiumClient.captureReceiptToRecords(
-                    imageJPEGData: compressedImageData,
-                    subjectID: identity.subjectID,
-                    chatID: identity.chatID
-                )
-                logger.info(
-                    "context=receipt_capture_synced record_id=\(syncResult.primaryRecordID ?? "none", privacy: .public) created=\(syncResult.created.count) updated=\(syncResult.updated.count)"
-                )
-                infoMessage = "Receipt synced to Mnexium Records."
-                await refreshReceipts(force: true)
-            } catch {
-                logError(error, context: "receipt_ocr_mnexium")
-                throw error
-            }
+            let syncResult = try await mnexiumClient.captureReceiptToRecords(
+                imageJPEGData: compressedImageData,
+                subjectID: identity.subjectID,
+                chatID: identity.chatID
+            )
+            logger.info(
+                "context=receipt_capture_synced record_id=\(syncResult.primaryRecordID ?? "none", privacy: .public) created=\(syncResult.created.count) updated=\(syncResult.updated.count)"
+            )
+            infoMessage = "Receipt synced to Mnexium Records."
+            await refreshReceipts(force: true)
         } catch {
             reportUserSafeError(
                 error,
@@ -129,19 +113,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
                 userMessage: "Couldn’t save receipt to Mnexium right now. Please try again."
             )
         }
-    }
-
-    func sendChatMessage(_ message: String) async throws -> String {
-        guard let mnexiumClient else {
-            throw MnexiumClientError.transport("Mnexium is not connected yet.")
-        }
-
-        let identity = identityStore.currentIdentity()
-        return try await mnexiumClient.sendChatMessage(
-            message,
-            subjectID: identity.subjectID,
-            chatID: identity.chatID
-        )
     }
 
     func streamChatMessage(_ message: String) -> AsyncThrowingStream<String, Error> {
@@ -202,10 +173,12 @@ final class ReceiptCaptureViewModel: ObservableObject {
                     purchasedAt: record.purchasedAt,
                     capturedAt: record.capturedAt,
                     rawText: record.rawText,
-                    mnexiumRecordID: record.id,
-                    imageData: nil
+                    mnexiumRecordID: record.id
                 )
             }
+            let validIDs = Set(receipts.map(\.id))
+            receiptItemsByReceiptID = receiptItemsByReceiptID.filter { validIDs.contains($0.key) }
+            receiptItemsLoadMessages = receiptItemsLoadMessages.filter { validIDs.contains($0.key) }
             if receipts.isEmpty {
                 receiptsLoadMessage = "No receipts synced yet."
             }
@@ -213,6 +186,45 @@ final class ReceiptCaptureViewModel: ObservableObject {
             receipts = []
             receiptsLoadMessage = "Couldn’t load receipts. Pull to refresh."
             logError(error, context: "list_receipts")
+        }
+    }
+
+    func loadReceiptItems(receiptID: String, force: Bool = false) async {
+        guard let mnexiumClient else {
+            receiptItemsLoadMessages[receiptID] = "Mnexium is not connected yet."
+            return
+        }
+        if loadingReceiptItemIDs.contains(receiptID) { return }
+        if !force, receiptItemsByReceiptID[receiptID] != nil { return }
+
+        loadingReceiptItemIDs.insert(receiptID)
+        receiptItemsLoadMessages[receiptID] = nil
+        defer { loadingReceiptItemIDs.remove(receiptID) }
+
+        do {
+            let identity = identityStore.currentIdentity()
+            let items = try await mnexiumClient.queryReceiptItems(
+                subjectID: identity.subjectID,
+                receiptID: receiptID
+            )
+            receiptItemsByReceiptID[receiptID] = items.map { item in
+                ReceiptItemEntry(
+                    id: item.id,
+                    receiptID: item.receiptID,
+                    itemName: item.itemName,
+                    quantity: item.quantity,
+                    unitPrice: item.unitPrice,
+                    lineTotal: item.lineTotal,
+                    category: item.category
+                )
+            }
+            if receiptItemsByReceiptID[receiptID]?.isEmpty == true {
+                receiptItemsLoadMessages[receiptID] = "No items found for this receipt."
+            }
+        } catch {
+            receiptItemsByReceiptID[receiptID] = []
+            receiptItemsLoadMessages[receiptID] = "Couldn’t load receipt items."
+            logError(error, context: "list_receipt_items")
         }
     }
 
@@ -275,7 +287,7 @@ final class ReceiptCaptureViewModel: ObservableObject {
         }
     }
 
-    func presentError(_ message: String) {
+    private func presentError(_ message: String) {
         errorMessage = message
         showingError = true
     }

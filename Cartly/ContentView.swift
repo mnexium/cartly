@@ -59,8 +59,8 @@ struct ContentView: View {
 
 private struct ReceiptDashboardTab: View {
     @ObservedObject var viewModel: ReceiptCaptureViewModel
-
-    @State private var showingCaptureSheet = false
+    @State private var showingCameraPicker = false
+    @State private var showingCameraUnavailableAlert = false
 
     var body: some View {
         NavigationStack {
@@ -90,36 +90,31 @@ private struct ReceiptDashboardTab: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(viewModel.receipts) { receipt in
-                            ReceiptRow(receipt: receipt)
+                            NavigationLink {
+                                ReceiptItemsSheet(receipt: receipt, viewModel: viewModel)
+                            } label: {
+                                ReceiptRow(receipt: receipt)
+                            }
                         }
                     }
                 }
             }
             .navigationTitle("Cartly")
+            .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 await viewModel.refreshReceipts(force: true)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        showingCaptureSheet = true
-                    } label: {
-                        Label("Capture", systemImage: "camera")
-                    }
-                }
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        Task {
-                            await viewModel.refreshReceipts(force: true)
-                        }
-                    } label: {
-                        if viewModel.isLoadingReceipts {
-                            ProgressView()
+                        if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                            showingCameraPicker = true
                         } else {
-                            Image(systemName: "arrow.clockwise")
+                            showingCameraUnavailableAlert = true
                         }
+                    } label: {
+                        Image(systemName: "camera")
                     }
-                    .disabled(viewModel.isLoadingReceipts)
                 }
             }
             .overlay {
@@ -130,12 +125,17 @@ private struct ReceiptDashboardTab: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
             }
-            .sheet(isPresented: $showingCaptureSheet) {
-                ReceiptCaptureSheet { image in
+            .sheet(isPresented: $showingCameraPicker) {
+                ImagePicker(sourceType: .camera) { image in
                     Task {
                         await viewModel.captureReceipt(from: image)
                     }
                 }
+            }
+            .alert("Camera Unavailable", isPresented: $showingCameraUnavailableAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("This device does not have an available camera.")
             }
             .task {
                 await viewModel.refreshReceipts(force: false)
@@ -155,6 +155,7 @@ private struct ChatTab: View {
     @State private var chatListMessage: String?
     @State private var activeChatID = ""
     @State private var isLoadingActiveHistory = false
+    @FocusState private var isComposerFocused: Bool
     @State private var lines: [ChatLine] = [
         ChatLine(role: .assistant, text: "Hi, I can help with spend questions and receipt insights.")
     ]
@@ -180,16 +181,6 @@ private struct ChatTab: View {
                             .background(Color(.secondarySystemBackground))
                             .clipShape(Circle())
                     }
-                }
-                .padding(.horizontal)
-
-                HStack(spacing: 8) {
-                    Image(systemName: viewModel.isMnexiumConfigured ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(viewModel.isMnexiumConfigured ? .green : .orange)
-                    Text(viewModel.isMnexiumConfigured ? "Mnexium connected" : viewModel.configurationMessage)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
                 }
                 .padding(.horizontal)
 
@@ -222,6 +213,10 @@ private struct ChatTab: View {
                         .padding(.horizontal)
                         .padding(.top, 8)
                     }
+                    .scrollDismissesKeyboard(.interactively)
+                    .onTapGesture {
+                        isComposerFocused = false
+                    }
                     .onChange(of: lines.count) { _, _ in
                         if let last = lines.last {
                             withAnimation {
@@ -235,8 +230,10 @@ private struct ChatTab: View {
                     TextField("Ask about spending...", text: $draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...4)
+                        .focused($isComposerFocused)
 
                     Button {
+                        isComposerFocused = false
                         sendMessage()
                     } label: {
                         if isSending {
@@ -250,6 +247,10 @@ private struct ChatTab: View {
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending || isLoadingActiveHistory)
                 }
                 .padding()
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isComposerFocused = false
             }
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showingChatDrawer) {
@@ -573,15 +574,6 @@ private struct ReceiptRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if receipt.mnexiumRecordID != nil {
-                    Label("Synced", systemImage: "icloud.and.arrow.up")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else {
-                    Label("Local only", systemImage: "iphone")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
             }
         }
         .padding(.vertical, 4)
@@ -592,59 +584,89 @@ private struct ReceiptRow: View {
     }
 }
 
-private struct ReceiptCaptureSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let onImagePicked: (UIImage) -> Void
-
-    @State private var showingImagePicker = false
-    @State private var pickerSourceType: UIImagePickerController.SourceType = .camera
+private struct ReceiptItemRow: View {
+    let item: ReceiptItemEntry
+    let currency: String
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
-                Text("Capture or import a receipt image. Cartly will extract text, parse it with Mnexium, and track spending by store.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Button {
-                    pickerSourceType = .camera
-                    showingImagePicker = true
-                } label: {
-                    Label("Take Receipt Photo", systemImage: "camera")
-                        .frame(maxWidth: .infinity)
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.itemName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                if let category = item.category, !category.isEmpty {
+                    Text(category)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
-
-                Button {
-                    pickerSourceType = .photoLibrary
-                    showingImagePicker = true
-                } label: {
-                    Label("Use Photo Library", systemImage: "photo")
-                        .frame(maxWidth: .infinity)
+                if let quantity = item.quantity {
+                    Text("Qty \(quantity.formatted(.number.precision(.fractionLength(0...2))))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-
-                Spacer()
             }
-            .padding()
-            .navigationTitle("Capture Receipt")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        dismiss()
+
+            Spacer()
+
+            if let lineTotal = item.lineTotal {
+                Text(lineTotal, format: .currency(code: normalizedCurrency))
+                    .font(.caption)
+                    .fontWeight(.semibold)
+            } else if let unitPrice = item.unitPrice {
+                Text(unitPrice, format: .currency(code: normalizedCurrency))
+                    .font(.caption)
+                    .fontWeight(.semibold)
+            }
+        }
+    }
+
+    private var normalizedCurrency: String {
+        currency.isEmpty ? "USD" : currency
+    }
+}
+
+private struct ReceiptItemsSheet: View {
+    let receipt: ReceiptEntry
+    @ObservedObject var viewModel: ReceiptCaptureViewModel
+
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(receipt.storeName)
+                        .font(.headline)
+                    Text(receipt.purchasedAt, format: .dateTime.year().month().day().hour().minute())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Items") {
+                if viewModel.loadingReceiptItemIDs.contains(receipt.id) {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading items...")
+                            .foregroundStyle(.secondary)
                     }
+                } else if let message = viewModel.receiptItemsLoadMessages[receipt.id] {
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                } else if let items = viewModel.receiptItemsByReceiptID[receipt.id], !items.isEmpty {
+                    ForEach(items) { item in
+                        ReceiptItemRow(item: item, currency: receipt.currency)
+                    }
+                } else {
+                    Text("No items found for this receipt.")
+                        .foregroundStyle(.secondary)
                 }
             }
-            .sheet(isPresented: $showingImagePicker) {
-                ImagePicker(sourceType: pickerSourceType) { image in
-                    onImagePicked(image)
-                    dismiss()
-                }
-            }
+        }
+        .navigationTitle("Receipt Items")
+        .refreshable {
+            await viewModel.loadReceiptItems(receiptID: receipt.id, force: true)
+        }
+        .task(id: receipt.id) {
+            await viewModel.loadReceiptItems(receiptID: receipt.id, force: false)
         }
     }
 }
