@@ -60,6 +60,7 @@ struct ContentView: View {
 private struct ReceiptDashboardTab: View {
     @ObservedObject var viewModel: ReceiptCaptureViewModel
     @State private var showingCameraPicker = false
+    @State private var showingManualReceiptSheet = false
     @State private var showingCameraUnavailableAlert = false
 
     var body: some View {
@@ -71,11 +72,6 @@ private struct ReceiptDashboardTab: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                }
-
-                Section("Storage") {
-                    Text("Receipts are stored in Mnexium Records only. Nothing is saved on-device.")
-                        .foregroundStyle(.secondary)
                 }
 
                 Section("Receipts") {
@@ -96,6 +92,11 @@ private struct ReceiptDashboardTab: View {
                                 ReceiptRow(receipt: receipt)
                             }
                         }
+                        .onDelete { offsets in
+                            Task {
+                                await viewModel.deleteReceipts(at: offsets)
+                            }
+                        }
                     }
                 }
             }
@@ -105,7 +106,7 @@ private struct ReceiptDashboardTab: View {
                 await viewModel.refreshReceipts(force: true)
             }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button {
                         if UIImagePickerController.isSourceTypeAvailable(.camera) {
                             showingCameraPicker = true
@@ -116,6 +117,16 @@ private struct ReceiptDashboardTab: View {
                         Image(systemName: "camera")
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingManualReceiptSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingManualReceiptSheet) {
+                ManualReceiptSheet(viewModel: viewModel)
             }
             .overlay {
                 if viewModel.isProcessing {
@@ -628,6 +639,7 @@ private struct ReceiptItemRow: View {
 private struct ReceiptItemsSheet: View {
     let receipt: ReceiptEntry
     @ObservedObject var viewModel: ReceiptCaptureViewModel
+    @State private var showingManualItemSheet = false
 
     var body: some View {
         List {
@@ -655,6 +667,11 @@ private struct ReceiptItemsSheet: View {
                     ForEach(items) { item in
                         ReceiptItemRow(item: item, currency: receipt.currency)
                     }
+                    .onDelete { offsets in
+                        Task {
+                            await viewModel.deleteReceiptItems(receiptID: receipt.id, at: offsets)
+                        }
+                    }
                 } else {
                     Text("No items found for this receipt.")
                         .foregroundStyle(.secondary)
@@ -662,11 +679,183 @@ private struct ReceiptItemsSheet: View {
             }
         }
         .navigationTitle("Receipt Items")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingManualItemSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showingManualItemSheet) {
+            ManualReceiptItemSheet(receipt: receipt, viewModel: viewModel)
+        }
         .refreshable {
             await viewModel.loadReceiptItems(receiptID: receipt.id, force: true)
         }
         .task(id: receipt.id) {
             await viewModel.loadReceiptItems(receiptID: receipt.id, force: false)
+        }
+    }
+}
+
+private struct ManualReceiptItemSheet: View {
+    let receipt: ReceiptEntry
+    @ObservedObject var viewModel: ReceiptCaptureViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var itemName = ""
+    @State private var quantity = ""
+    @State private var unitPrice = ""
+    @State private var lineTotal = ""
+    @State private var category = ""
+    @State private var isSaving = false
+
+    private var parsedQuantity: Double? { parseOptionalNumber(quantity) }
+    private var parsedUnitPrice: Double? { parseOptionalNumber(unitPrice) }
+    private var parsedLineTotal: Double? { parseOptionalNumber(lineTotal) }
+
+    private var canSave: Bool {
+        !itemName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSaving
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Item") {
+                    TextField("Item name", text: $itemName)
+                    TextField("Quantity (optional)", text: $quantity)
+                        .keyboardType(.decimalPad)
+                    TextField("Unit price (optional)", text: $unitPrice)
+                        .keyboardType(.decimalPad)
+                    TextField("Line total (optional)", text: $lineTotal)
+                        .keyboardType(.decimalPad)
+                    TextField("Category (optional)", text: $category)
+                }
+            }
+            .navigationTitle("Add Item")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving..." : "Save") {
+                        save()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        let categoryValue = category.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        Task {
+            let success = await viewModel.createManualReceiptItem(
+                receiptID: receipt.id,
+                itemName: itemName,
+                quantity: parsedQuantity,
+                unitPrice: parsedUnitPrice,
+                lineTotal: parsedLineTotal,
+                category: categoryValue.isEmpty ? nil : categoryValue
+            )
+            isSaving = false
+            if success {
+                dismiss()
+            }
+        }
+    }
+
+    private func parseOptionalNumber(_ text: String) -> Double? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "")
+        guard !normalized.isEmpty else { return nil }
+        return Double(normalized)
+    }
+}
+
+private struct ManualReceiptSheet: View {
+    @ObservedObject var viewModel: ReceiptCaptureViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var storeName = ""
+    @State private var totalAmount = ""
+    @State private var currency = "USD"
+    @State private var purchasedAt = Date()
+    @State private var rawText = ""
+    @State private var isSaving = false
+
+    private var parsedAmount: Double? {
+        let normalized = totalAmount.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: "")
+        return Double(normalized)
+    }
+
+    private var canSave: Bool {
+        !storeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (parsedAmount?.isFinite == true)
+            && !isSaving
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Receipt") {
+                    TextField("Store name", text: $storeName)
+                    TextField("Total", text: $totalAmount)
+                        .keyboardType(.decimalPad)
+                    TextField("Currency", text: $currency)
+                        .textInputAutocapitalization(.characters)
+                    DatePicker("Purchased at", selection: $purchasedAt, displayedComponents: [.date, .hourAndMinute])
+                }
+
+                Section("Raw Text (Optional)") {
+                    TextField("Paste receipt text", text: $rawText, axis: .vertical)
+                        .lineLimit(3...8)
+                }
+            }
+            .navigationTitle("Add Receipt")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving..." : "Save") {
+                        save()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard let amount = parsedAmount else { return }
+        isSaving = true
+
+        Task {
+            let success = await viewModel.createManualReceipt(
+                storeName: storeName,
+                total: amount,
+                currency: currency,
+                purchasedAt: purchasedAt,
+                rawText: rawText
+            )
+            isSaving = false
+            if success {
+                dismiss()
+            }
         }
     }
 }

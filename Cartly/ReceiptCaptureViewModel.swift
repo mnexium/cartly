@@ -166,7 +166,7 @@ final class ReceiptCaptureViewModel: ObservableObject {
             let remoteReceipts = try await mnexiumClient.listReceiptRecords(subjectID: identity.subjectID)
             receipts = remoteReceipts.map { record in
                 ReceiptEntry(
-                    id: record.receiptID,
+                    id: record.id,
                     storeName: record.storeName,
                     total: record.total,
                     currency: record.currency,
@@ -186,6 +186,206 @@ final class ReceiptCaptureViewModel: ObservableObject {
             receipts = []
             receiptsLoadMessage = "Couldn’t load receipts. Pull to refresh."
             logError(error, context: "list_receipts")
+        }
+    }
+
+    func deleteReceipts(at offsets: IndexSet) async {
+        guard let mnexiumClient else {
+            presentError("Mnexium is not connected yet.")
+            return
+        }
+        guard !offsets.isEmpty else { return }
+
+        let identity = identityStore.currentIdentity()
+        let sortedOffsets = offsets.sorted(by: >)
+
+        do {
+            for offset in sortedOffsets {
+                guard receipts.indices.contains(offset) else { continue }
+                let receipt = receipts[offset]
+                let recordID = receipt.mnexiumRecordID ?? receipt.id
+
+                let relatedItems = try await mnexiumClient.queryReceiptItems(
+                    subjectID: identity.subjectID,
+                    receiptID: receipt.id
+                )
+                for item in relatedItems {
+                    do {
+                        try await mnexiumClient.deleteReceiptItemRecord(
+                            subjectID: identity.subjectID,
+                            recordID: item.id
+                        )
+                    } catch {
+                        logError(error, context: "delete_receipt_item")
+                    }
+                }
+
+                try await mnexiumClient.deleteReceiptRecord(
+                    subjectID: identity.subjectID,
+                    recordID: recordID
+                )
+
+                receipts.remove(at: offset)
+                receiptItemsByReceiptID[receipt.id] = nil
+                receiptItemsLoadMessages[receipt.id] = nil
+            }
+
+            if receipts.isEmpty {
+                receiptsLoadMessage = "No receipts synced yet."
+            }
+            infoMessage = sortedOffsets.count == 1 ? "Receipt deleted." : "Receipts deleted."
+        } catch {
+            reportUserSafeError(
+                error,
+                context: "delete_receipt",
+                userMessage: "Couldn’t delete receipt from Mnexium right now. Please try again."
+            )
+        }
+    }
+
+    func createManualReceipt(
+        storeName: String,
+        total: Double,
+        currency: String,
+        purchasedAt: Date,
+        rawText: String
+    ) async -> Bool {
+        guard let mnexiumClient else {
+            presentError("Mnexium is not connected yet.")
+            return false
+        }
+
+        let trimmedStoreName = storeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedStoreName.isEmpty else {
+            presentError("Store name is required.")
+            return false
+        }
+        guard total.isFinite else {
+            presentError("Total amount is invalid.")
+            return false
+        }
+
+        let normalizedCurrency = currency.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let finalCurrency = normalizedCurrency.isEmpty ? "USD" : normalizedCurrency
+
+        do {
+            let identity = identityStore.currentIdentity()
+            try await mnexiumClient.createReceiptRecord(
+                subjectID: identity.subjectID,
+                chatID: identity.chatID,
+                storeName: trimmedStoreName,
+                total: total,
+                currency: finalCurrency,
+                purchasedAt: purchasedAt,
+                rawText: rawText
+            )
+            infoMessage = "Receipt added."
+            await refreshReceipts(force: true)
+            return true
+        } catch {
+            reportUserSafeError(
+                error,
+                context: "create_manual_receipt",
+                userMessage: "Couldn’t add receipt to Mnexium right now. Please try again."
+            )
+            return false
+        }
+    }
+
+    func createManualReceiptItem(
+        receiptID: String,
+        itemName: String,
+        quantity: Double?,
+        unitPrice: Double?,
+        lineTotal: Double?,
+        category: String?
+    ) async -> Bool {
+        guard let mnexiumClient else {
+            presentError("Mnexium is not connected yet.")
+            return false
+        }
+
+        let normalizedReceiptID = receiptID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedItemName = itemName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedReceiptID.isEmpty else {
+            presentError("Receipt ID is missing.")
+            return false
+        }
+        guard !normalizedItemName.isEmpty else {
+            presentError("Item name is required.")
+            return false
+        }
+        if let quantity, (!quantity.isFinite || quantity < 0) {
+            presentError("Quantity must be a valid number.")
+            return false
+        }
+        if let unitPrice, (!unitPrice.isFinite || unitPrice < 0) {
+            presentError("Unit price must be a valid number.")
+            return false
+        }
+        if let lineTotal, (!lineTotal.isFinite || lineTotal < 0) {
+            presentError("Line total must be a valid number.")
+            return false
+        }
+
+        do {
+            let identity = identityStore.currentIdentity()
+            try await mnexiumClient.createReceiptItemRecord(
+                subjectID: identity.subjectID,
+                chatID: identity.chatID,
+                receiptID: normalizedReceiptID,
+                itemName: normalizedItemName,
+                quantity: quantity,
+                unitPrice: unitPrice,
+                lineTotal: lineTotal,
+                category: category
+            )
+            infoMessage = "Receipt item added."
+            await loadReceiptItems(receiptID: normalizedReceiptID, force: true)
+            return true
+        } catch {
+            reportUserSafeError(
+                error,
+                context: "create_manual_receipt_item",
+                userMessage: "Couldn’t add receipt item to Mnexium right now. Please try again."
+            )
+            return false
+        }
+    }
+
+    func deleteReceiptItems(receiptID: String, at offsets: IndexSet) async {
+        guard let mnexiumClient else {
+            presentError("Mnexium is not connected yet.")
+            return
+        }
+        guard !offsets.isEmpty else { return }
+        guard var items = receiptItemsByReceiptID[receiptID], !items.isEmpty else { return }
+
+        let identity = identityStore.currentIdentity()
+        let sortedOffsets = offsets.sorted(by: >)
+
+        do {
+            for offset in sortedOffsets {
+                guard items.indices.contains(offset) else { continue }
+                let item = items[offset]
+                try await mnexiumClient.deleteReceiptItemRecord(
+                    subjectID: identity.subjectID,
+                    recordID: item.id
+                )
+                items.remove(at: offset)
+            }
+
+            receiptItemsByReceiptID[receiptID] = items
+            if items.isEmpty {
+                receiptItemsLoadMessages[receiptID] = "No items found for this receipt."
+            }
+            infoMessage = sortedOffsets.count == 1 ? "Receipt item deleted." : "Receipt items deleted."
+        } catch {
+            reportUserSafeError(
+                error,
+                context: "delete_receipt_items",
+                userMessage: "Couldn’t delete receipt item right now. Please try again."
+            )
         }
     }
 

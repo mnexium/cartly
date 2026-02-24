@@ -215,6 +215,7 @@ final class MnexiumClient {
                     recall: true,
                     summarize: "balanced",
                     records: MnxRecordsContext(
+                        learn: "auto",
                         recall: true,
                         tables: ["receipts", "receipt_items"]
                     )
@@ -288,6 +289,105 @@ final class MnexiumClient {
         return try extractReceiptRecords(from: data)
     }
 
+    func createReceiptRecord(
+        subjectID: String,
+        chatID: String,
+        storeName: String,
+        total: Double,
+        currency: String,
+        purchasedAt: Date,
+        rawText: String
+    ) async throws {
+        let normalizedSubjectID = try nonEmpty(subjectID, field: "subject_id")
+        let normalizedChatID = try nonEmpty(chatID, field: "chat_id")
+        let normalizedStoreName = try nonEmpty(storeName, field: "store_name")
+        let normalizedCurrency = try nonEmpty(currency, field: "currency")
+
+        let payload = CreateReceiptRecordRequest(
+            subject_id: normalizedSubjectID,
+            data: CreateReceiptData(
+                store_name: normalizedStoreName,
+                total: total,
+                currency: normalizedCurrency,
+                purchased_at: iso8601Formatter.string(from: purchasedAt),
+                raw_text: rawText
+            ),
+            mnx: MnxContext(
+                subject_id: normalizedSubjectID,
+                chat_id: normalizedChatID,
+                history: false,
+                learn: false,
+                recall: false,
+                summarize: nil
+            )
+        )
+
+        _ = try await send(path: "/api/v1/records/receipts", method: "POST", payload: payload)
+    }
+
+    func createReceiptItemRecord(
+        subjectID: String,
+        chatID: String,
+        receiptID: String,
+        itemName: String,
+        quantity: Double?,
+        unitPrice: Double?,
+        lineTotal: Double?,
+        category: String?
+    ) async throws {
+        let normalizedSubjectID = try nonEmpty(subjectID, field: "subject_id")
+        let normalizedChatID = try nonEmpty(chatID, field: "chat_id")
+        let normalizedReceiptID = try nonEmpty(receiptID, field: "receipt_id")
+        let normalizedItemName = try nonEmpty(itemName, field: "item_name")
+        let normalizedCategory = normalizedOptionalString(category)
+
+        let payload = CreateReceiptItemRecordRequest(
+            subject_id: normalizedSubjectID,
+            data: CreateReceiptItemData(
+                receipt_id: normalizedReceiptID,
+                item_name: normalizedItemName,
+                quantity: quantity,
+                unit_price: unitPrice,
+                line_total: lineTotal,
+                category: normalizedCategory
+            ),
+            mnx: MnxContext(
+                subject_id: normalizedSubjectID,
+                chat_id: normalizedChatID,
+                history: false,
+                learn: false,
+                recall: false,
+                summarize: nil
+            )
+        )
+
+        _ = try await send(path: "/api/v1/records/receipt_items", method: "POST", payload: payload)
+    }
+
+    func deleteReceiptRecord(subjectID: String, recordID: String) async throws {
+        let normalizedSubjectID = try nonEmpty(subjectID, field: "subject_id")
+        let normalizedRecordID = try nonEmpty(recordID, field: "record_id")
+        let encodedRecordID = try encodedPathComponent(normalizedRecordID, field: "record_id")
+
+        _ = try await send(
+            path: "/api/v1/records/receipts/\(encodedRecordID)",
+            method: "DELETE",
+            queryItems: [URLQueryItem(name: "subject_id", value: normalizedSubjectID)]
+        )
+    }
+
+    func deleteReceiptItemRecord(subjectID: String, recordID: String) async throws {
+        let normalizedSubjectID = try nonEmpty(subjectID, field: "subject_id")
+        let normalizedRecordID = try nonEmpty(recordID, field: "record_id")
+        let encodedRecordID = try encodedPathComponent(normalizedRecordID, field: "record_id")
+
+        _ = try await send(
+            path: "/api/v1/records/receipt_items/\(encodedRecordID)",
+            method: "DELETE",
+            queryItems: [URLQueryItem(name: "subject_id", value: normalizedSubjectID)]
+        )
+    }
+
     func queryReceiptItems(subjectID: String, receiptID: String, limit: Int = 200) async throws -> [MnexiumReceiptItemRecord] {
         _ = try nonEmpty(subjectID, field: "subject_id")
         let normalizedReceiptID = try nonEmpty(receiptID, field: "receipt_id")
@@ -343,7 +443,10 @@ final class MnexiumClient {
 
         let parsedReceiptJSON = try normalizedJSONObjectString(from: ocrContent)
         let persistenceMessage = """
-        Persist this parsed receipt into Mnexium Records. Only create or update rows in tables receipts and receipt_items. Use receipt.receipt_id to link items.
+        Persist this parsed receipt into Mnexium Records. Only create or update rows in tables receipts and receipt_items.
+        Receipts schema fields are: total, currency, raw_text, store_name, purchased_at (do not include receipt_id on receipts).
+        Receipt_items schema fields are: category, quantity, item_name, line_total, receipt_id, unit_price.
+        Link each receipt_items.receipt_id to the parent receipts record_id.
 
         \(parsedReceiptJSON)
         """
@@ -394,18 +497,17 @@ final class MnexiumClient {
 
         let receiptsSchema = ReceiptSchema(
             fields: [
-                "receipt_id": SchemaField(type: "string", required: true),
                 "store_name": SchemaField(type: "string", required: true),
                 "total": SchemaField(type: "number", required: true),
                 "currency": SchemaField(type: "string", required: true),
-                "purchased_at": SchemaField(type: "string", required: false),
+                "purchased_at": SchemaField(type: "datetime", required: false),
                 "raw_text": SchemaField(type: "string", required: false)
             ]
         )
 
         let receiptItemsSchema = ReceiptSchema(
             fields: [
-                "receipt_id": SchemaField(type: "string", required: true),
+                "receipt_id": SchemaField(type: "ref:receipts", required: true),
                 "item_name": SchemaField(type: "string", required: true),
                 "quantity": SchemaField(type: "number", required: false),
                 "unit_price": SchemaField(type: "number", required: false),
@@ -468,7 +570,7 @@ final class MnexiumClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = bodyData
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeoutForPath(path)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(configuration.apiKey, forHTTPHeaderField: "x-mnexium-key")
         if let openAIKey = configuration.openAIKey {
@@ -491,7 +593,7 @@ final class MnexiumClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 30
+        request.timeoutInterval = timeoutForPath(path)
         request.setValue(configuration.apiKey, forHTTPHeaderField: "x-mnexium-key")
         if let openAIKey = configuration.openAIKey {
             request.setValue(openAIKey, forHTTPHeaderField: "x-openai-key")
@@ -557,15 +659,30 @@ final class MnexiumClient {
         throw MnexiumClientError.transport("Exhausted retry attempts")
     }
 
+    private func timeoutForPath(_ path: String) -> TimeInterval {
+        if path == "/api/v1/chat/completions" {
+            return 240
+        }
+        return 30
+    }
+
+    private func timeoutForStreamingPath(_ path: String) -> TimeInterval {
+        if path == "/api/v1/chat/completions" {
+            return 360
+        }
+        return 60
+    }
+
     private func streamChat(_ payload: ChatRequest, continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
-        guard let url = URL(string: "/api/v1/chat/completions", relativeTo: configuration.baseURL)?.absoluteURL else {
-            throw MnexiumClientError.transport("Invalid Mnexium URL path: /api/v1/chat/completions")
+        let path = "/api/v1/chat/completions"
+        guard let url = URL(string: path, relativeTo: configuration.baseURL)?.absoluteURL else {
+            throw MnexiumClientError.transport("Invalid Mnexium URL path: \(path)")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder().encode(payload)
-        request.timeoutInterval = 60
+        request.timeoutInterval = timeoutForStreamingPath(path)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(configuration.apiKey, forHTTPHeaderField: "x-mnexium-key")
         if let openAIKey = configuration.openAIKey {
@@ -1034,24 +1151,33 @@ final class MnexiumClient {
         let sourceArray = findRecordArray(in: object)
 
         let parsed: [MnexiumReceiptRecord] = sourceArray.compactMap { item in
-            let recordID = firstNonEmptyString(from: item, keys: ["id", "record_id", "recordId"])
             let payload = firstObject(in: item, keys: ["data", "record", "value"]) ?? item
+            let recordID = firstNonEmptyString(from: payload, keys: ["record_id"])
+                ?? firstNonEmptyString(from: item, keys: ["record_id", "id"])
+            guard let resolvedRecordID = recordID else { return nil }
 
-            let receiptID = firstNonEmptyString(from: payload, keys: ["receipt_id", "receiptId"])
-                ?? firstNonEmptyString(from: item, keys: ["receipt_id", "receiptId"])
-                ?? recordID
-                ?? UUID().uuidString.lowercased()
-
-            let storeName = firstNonEmptyString(from: payload, keys: ["store_name", "storeName", "merchant", "name"]) ?? "Unknown Store"
-            let total = firstDouble(from: payload, keys: ["total", "amount", "grand_total", "sum"]) ?? 0
-            let currency = firstNonEmptyString(from: payload, keys: ["currency", "currency_code"]) ?? "USD"
+            let linkReceiptID = firstNonEmptyString(from: payload, keys: ["receipt_id"])
+                ?? firstNonEmptyString(from: item, keys: ["receipt_id"])
+                ?? resolvedRecordID
+            guard let storeName = firstNonEmptyString(from: payload, keys: ["store_name"])
+                ?? firstNonEmptyString(from: item, keys: ["store_name"]) else {
+                return nil
+            }
+            guard let total = firstDouble(from: payload, keys: ["total"])
+                ?? firstDouble(from: item, keys: ["total"]) else {
+                return nil
+            }
+            guard let currency = firstNonEmptyString(from: payload, keys: ["currency"])
+                ?? firstNonEmptyString(from: item, keys: ["currency"]) else {
+                return nil
+            }
 
             let purchasedAt = parseFlexibleDate(
                 from: payload,
-                keys: ["purchased_at", "purchasedAt", "date", "transaction_date", "transactionDate"]
+                keys: ["purchased_at"]
             ) ?? parseFlexibleDate(
                 from: item,
-                keys: ["purchased_at", "purchasedAt", "created_at", "createdAt", "timestamp", "time", "at"]
+                keys: ["purchased_at", "created_at", "createdAt", "timestamp", "time", "at"]
             ) ?? Date()
 
             let capturedAt = parseFlexibleDate(
@@ -1062,11 +1188,13 @@ final class MnexiumClient {
                 keys: ["created_at", "createdAt"]
             ) ?? purchasedAt
 
-            let rawText = firstNonEmptyString(from: payload, keys: ["raw_text", "rawText", "ocr_text", "ocrText"]) ?? ""
+            let rawText = firstNonEmptyString(from: payload, keys: ["raw_text"])
+                ?? firstNonEmptyString(from: item, keys: ["raw_text"])
+                ?? ""
 
             return MnexiumReceiptRecord(
-                id: recordID ?? receiptID,
-                receiptID: receiptID,
+                id: resolvedRecordID,
+                receiptID: linkReceiptID,
                 storeName: storeName,
                 total: total,
                 currency: currency,
@@ -1086,19 +1214,26 @@ final class MnexiumClient {
         let sourceArray = findRecordArray(in: object)
 
         return sourceArray.compactMap { item in
-            let recordID = firstNonEmptyString(from: item, keys: ["id", "record_id", "recordId"])
             let payload = firstObject(in: item, keys: ["data", "record", "value"]) ?? item
+            let recordID = firstNonEmptyString(from: payload, keys: ["record_id"])
+                ?? firstNonEmptyString(from: item, keys: ["record_id", "id"])
 
-            let receiptID = firstNonEmptyString(from: payload, keys: ["receipt_id", "receiptId"])
-                ?? firstNonEmptyString(from: item, keys: ["receipt_id", "receiptId"])
-                ?? ""
-            guard !receiptID.isEmpty else { return nil }
-
-            let itemName = firstNonEmptyString(from: payload, keys: ["item_name", "itemName", "name"]) ?? "Unnamed Item"
-            let quantity = firstDouble(from: payload, keys: ["quantity", "qty"])
-            let unitPrice = firstDouble(from: payload, keys: ["unit_price", "unitPrice", "price"])
-            let lineTotal = firstDouble(from: payload, keys: ["line_total", "lineTotal", "total", "amount"])
+            guard let receiptID = firstNonEmptyString(from: payload, keys: ["receipt_id"])
+                ?? firstNonEmptyString(from: item, keys: ["receipt_id"]) else {
+                return nil
+            }
+            guard let itemName = firstNonEmptyString(from: payload, keys: ["item_name"])
+                ?? firstNonEmptyString(from: item, keys: ["item_name"]) else {
+                return nil
+            }
+            let quantity = firstDouble(from: payload, keys: ["quantity"])
+                ?? firstDouble(from: item, keys: ["quantity"])
+            let unitPrice = firstDouble(from: payload, keys: ["unit_price"])
+                ?? firstDouble(from: item, keys: ["unit_price"])
+            let lineTotal = firstDouble(from: payload, keys: ["line_total"])
+                ?? firstDouble(from: item, keys: ["line_total"])
             let category = firstNonEmptyString(from: payload, keys: ["category"])
+                ?? firstNonEmptyString(from: item, keys: ["category"])
 
             return MnexiumReceiptItemRecord(
                 id: recordID ?? "\(receiptID)-\(itemName)-\(UUID().uuidString.lowercased())",
@@ -1128,7 +1263,7 @@ final class MnexiumClient {
                 keys: ["updated", "modified"]
             )
             let actions = extractActions(from: recordsObject, created: created, updated: updated)
-            outcomeResult = MnexiumRecordsSyncResult(created: created, updated: updated, actions: actions)
+            outcomeResult =  MnexiumRecordsSyncResult(created: created, updated: updated, actions: actions)
         } else {
             outcomeResult = MnexiumRecordsSyncResult(
                 created: [],
@@ -1221,7 +1356,7 @@ final class MnexiumClient {
 
                     guard let entryObject = entry as? [String: Any] else { continue }
 
-                    let id = firstString(in: entryObject, keys: ["id", "record_id", "recordID"])
+                    let id = firstString(in: entryObject, keys: ["record_id", "recordId", "recordID", "id"])
                     let table = firstString(in: entryObject, keys: ["table", "type", "type_name", "record_type"])
                     let action = firstString(in: entryObject, keys: ["action", "operation", "op"]) ?? key
                     result.append(MnexiumRecordMutation(id: id, table: table, action: action))
@@ -1230,7 +1365,7 @@ final class MnexiumClient {
             }
 
             if let entryObject = object[key] as? [String: Any] {
-                let id = firstString(in: entryObject, keys: ["id", "record_id", "recordID"])
+                let id = firstString(in: entryObject, keys: ["record_id", "recordId", "recordID", "id"])
                 let table = firstString(in: entryObject, keys: ["table", "type", "type_name", "record_type"])
                 let action = firstString(in: entryObject, keys: ["action", "operation", "op"]) ?? key
                 result.append(MnexiumRecordMutation(id: id, table: table, action: action))
@@ -1247,7 +1382,7 @@ final class MnexiumClient {
                     guard let tableEntryArray = tableEntries as? [Any] else { continue }
                     for tableEntry in tableEntryArray {
                         if let tableEntryObject = tableEntry as? [String: Any] {
-                            let id = firstString(in: tableEntryObject, keys: ["id", "record_id", "recordID"])
+                            let id = firstString(in: tableEntryObject, keys: ["record_id", "recordId", "recordID", "id"])
                             let action = firstString(in: tableEntryObject, keys: ["action", "operation", "op"]) ?? key
                             result.append(MnexiumRecordMutation(id: id, table: tableName, action: action))
                         } else if let tableEntryID = tableEntry as? String {
@@ -1324,7 +1459,7 @@ final class MnexiumClient {
 
     private func extractMnxRecordMutations(from entries: [[String: Any]]) -> [MnexiumRecordMutation] {
         entries.map { entry in
-            let id = firstString(in: entry, keys: ["recordId", "record_id", "recordID", "id"])
+            let id = firstString(in: entry, keys: ["record_id", "recordId", "recordID", "id"])
             let table = firstString(in: entry, keys: ["typeName", "type_name", "record_type", "table", "type"])
             let action = firstString(in: entry, keys: ["action", "operation", "op", "mode"]) ?? "upsert"
             return MnexiumRecordMutation(id: id, table: table, action: action)
@@ -1434,6 +1569,21 @@ final class MnexiumClient {
             throw MnexiumClientError.invalidInput("\(field) is required")
         }
         return normalized
+    }
+
+    private func encodedPathComponent(_ value: String, field: String) throws -> String {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed),
+              !encoded.isEmpty else {
+            throw MnexiumClientError.invalidInput("Invalid path component for \(field)")
+        }
+        return encoded
+    }
+
+    private var iso8601Formatter: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
     }
 
     private func requestID(from response: HTTPURLResponse) -> String? {
@@ -1633,6 +1783,35 @@ private struct RecordsQueryRequest: Encodable {
     let order_by: String?
     let limit: Int?
     let offset: Int?
+}
+
+private struct CreateReceiptRecordRequest: Encodable {
+    let subject_id: String
+    let data: CreateReceiptData
+    let mnx: MnxContext
+}
+
+private struct CreateReceiptData: Encodable {
+    let store_name: String
+    let total: Double
+    let currency: String
+    let purchased_at: String
+    let raw_text: String
+}
+
+private struct CreateReceiptItemRecordRequest: Encodable {
+    let subject_id: String
+    let data: CreateReceiptItemData
+    let mnx: MnxContext
+}
+
+private struct CreateReceiptItemData: Encodable {
+    let receipt_id: String
+    let item_name: String
+    let quantity: Double?
+    let unit_price: Double?
+    let line_total: Double?
+    let category: String?
 }
 
 private struct ReceiptSchema: Encodable {
