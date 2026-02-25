@@ -66,14 +66,6 @@ private struct ReceiptDashboardTab: View {
     var body: some View {
         NavigationStack {
             List {
-                if let infoMessage = viewModel.infoMessage {
-                    Section {
-                        Text(infoMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
                 Section("Receipts") {
                     if viewModel.isLoadingReceipts && viewModel.receipts.isEmpty {
                         HStack(spacing: 10) {

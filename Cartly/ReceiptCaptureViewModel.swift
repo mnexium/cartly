@@ -10,12 +10,22 @@ struct AppServiceError: Sendable {
     let userMessage: String
 }
 
+enum ReceiptOCRError: LocalizedError {
+    case noImageData
+
+    var errorDescription: String? {
+        switch self {
+        case .noImageData:
+            return "Could not read image data for OCR."
+        }
+    }
+}
+
 @MainActor
 final class ReceiptCaptureViewModel: ObservableObject {
     @Published var isProcessing = false
     @Published var errorMessage = ""
     @Published var showingError = false
-    @Published var infoMessage: String?
     @Published var receipts: [ReceiptEntry] = []
     @Published var isLoadingReceipts = false
     @Published var receiptsLoadMessage: String?
@@ -82,7 +92,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
         guard !isProcessing else { return }
 
         isProcessing = true
-        infoMessage = nil
         defer { isProcessing = false }
 
         do {
@@ -104,7 +113,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
             logger.info(
                 "context=receipt_capture_synced record_id=\(syncResult.primaryRecordID ?? "none", privacy: .public) created=\(syncResult.created.count) updated=\(syncResult.updated.count)"
             )
-            infoMessage = "Receipt synced to Mnexium Records."
             await refreshReceipts(force: true)
         } catch {
             reportUserSafeError(
@@ -233,7 +241,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
             if receipts.isEmpty {
                 receiptsLoadMessage = "No receipts synced yet."
             }
-            infoMessage = sortedOffsets.count == 1 ? "Receipt deleted." : "Receipts deleted."
         } catch {
             reportUserSafeError(
                 error,
@@ -279,7 +286,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
                 purchasedAt: purchasedAt,
                 rawText: rawText
             )
-            infoMessage = "Receipt added."
             await refreshReceipts(force: true)
             return true
         } catch {
@@ -340,7 +346,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
                 lineTotal: lineTotal,
                 category: category
             )
-            infoMessage = "Receipt item added."
             await loadReceiptItems(receiptID: normalizedReceiptID, force: true)
             return true
         } catch {
@@ -379,7 +384,6 @@ final class ReceiptCaptureViewModel: ObservableObject {
             if items.isEmpty {
                 receiptItemsLoadMessages[receiptID] = "No items found for this receipt."
             }
-            infoMessage = sortedOffsets.count == 1 ? "Receipt item deleted." : "Receipt items deleted."
         } catch {
             reportUserSafeError(
                 error,
