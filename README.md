@@ -1,113 +1,169 @@
-# Cartly
+# 🛒 Cartly
 
-Cartly is an open-source iOS demo app that shows how to build a production-style AI experience on top of Mnexium.
+Cartly is an open-source iOS app that demonstrates how to build a real AI product on Mnexium.
+It is not a toy chatbot. It is a working reference for chat, history, OCR ingestion, and schema-backed records in one app.
 
-The goal is simple: give developers a clear, working example of how far Mnexium can go in one app, including chat, history, OCR ingestion, and schema-backed Records.
+## 🎯 Purpose
 
-## Why This App Exists
+Cartly exists to show developers what Mnexium enables when you combine:
 
-Cartly is intentionally built as a practical reference implementation for:
+- conversational AI
+- persistent memory context
+- structured application data
+- deterministic records writes
+- real multi-thread chat history
 
-- Mnexium chat with streaming responses
-- Mnexium chat history list/read flows
-- OCR-style receipt ingestion with image input
-- Mnexium Records schema creation and CRUD
-- subject/chat identity management
-- records sync via `mnx.records.sync=true`
+## 🚀 Why Mnexium
 
-## What It Demonstrates
+Mnexium gives you a single runtime model for AI apps:
 
-### 1) AI Chat + Memory Context
+- One `mnx` context object to control behavior (`history`, `learn`, `recall`, `records`, and more).
+- Stable identity model with `subject_id` and `chat_id` for durable conversations.
+- Native Records layer for typed entities, schema validation, and CRUD/query workflows.
+- Chat + data workflows in the same request pipeline (for example, receipt extraction -> records sync).
+- Production-friendly controls like retries, request tracing, and explicit sync semantics.
 
-The chat tab sends prompts to `/api/v1/chat/completions` with an `mnx` object that includes:
+In short: Mnexium helps you ship AI apps that are useful after the first prompt, not just impressive in a demo.
+
+## 🧰 Mnexium Tooling In This Project
+
+Cartly was built as a Mnexium-first app. The implementation directly uses Mnexium APIs and request patterns rather than treating Mnexium as a black box.
+
+### 🤖 Skill Used: `mnexium-app-builder`
+
+This project was also developed using the `mnexium-app-builder` Codex skill to keep implementation aligned with Mnexium best practices for:
+
+- stable `subject_id` / `chat_id` usage
+- chat + history endpoint mapping
+- records schema and CRUD correctness
+- `mnx.records.sync` persistence behavior
+- retry/error handling and integration hardening
+
+You can learn more about Mnexium skills and tooling in the official docs:
+
+- [Mnexium Docs](https://mnexium.com/docs)
+
+How Mnexium is used in this codebase:
+
+- Mnexium chat runtime via `POST /api/v1/chat/completions`
+- Mnexium chat history toolchain via:
+  - `GET /api/v1/chat/history/list`
+  - `GET /api/v1/chat/history/read`
+- Mnexium Records schema management via `POST /api/v1/records/schemas`
+- Mnexium Records CRUD/query for `receipts` and `receipt_items`
+- Mnexium records sync orchestration using `mnx.records.sync=true` for OCR persistence
+
+Where to see the integration:
+
+- `Cartly/Mnexium/MnexiumClient+Chat.swift`
+- `Cartly/Mnexium/MnexiumClient+Records.swift`
+- `Cartly/Mnexium/MnexiumClient+Transport.swift`
+- `Cartly/Mnexium/MnexiumClient+Parsing.swift`
+
+## 🧠 What Cartly Demonstrates
+
+### 💬 Streaming Chat with Memory Context
+
+Cartly calls `POST /api/v1/chat/completions` with an `mnx` object including:
 
 - `subject_id`
 - `chat_id`
-- `history`, `learn`, `recall`
-- Records context (`tables: ["receipts", "receipt_items"]`)
+- `history=true`
+- `learn=true`
+- `recall=true`
+- records context for `receipts` and `receipt_items`
 
-Streaming is enabled for chat responses.
+### 🗂 Chat History Sidebar
 
-### 2) Chat History Sidebar
-
-Chat history is loaded using:
+Cartly loads real thread history with:
 
 - `GET /api/v1/chat/history/list`
 - `GET /api/v1/chat/history/read`
 
-This powers a multi-chat sidebar where users can switch threads and load prior messages.
+Users can switch across previous chats, not just keep one ephemeral session.
 
-### 3) Receipt Capture -> OCR -> Records Sync
+### 📸 Receipt OCR -> Structured Records
 
-Camera capture flow:
+The receipt capture flow:
 
-1. User captures a receipt photo.
-2. Image is compressed and sent to Mnexium chat OCR prompt.
-3. Parsed JSON is sent in a second non-stream request with:
-   - `mnx.records.sync=true`
-   - `mnx.records.learn="force"`
-   - `tables=["receipts","receipt_items"]`
-4. Mnexium writes structured rows to Records.
+1. Capture photo from camera.
+2. Compress and send image for OCR parsing.
+3. Send parsed JSON in a non-stream persistence request.
+4. Sync to Mnexium Records using `mnx.records.sync=true`.
 
-### 4) Records CRUD UI
+This pattern is a strong template for AI extraction workflows in production apps.
+
+### 🧾 Records CRUD
 
 The Data tab demonstrates:
 
-- List receipt records
-- Swipe delete receipts
-- Query receipt items by `receipt_id`
-- Add manual receipt records
-- Add/delete manual receipt item records
+- list receipts
+- create manual receipts
+- delete receipts
+- query receipt items by `receipt_id`
+- create and delete receipt items
 
-## Mnexium Records Schema
+## 🧱 Mnexium Records Schema
 
-This repo includes a reusable schema file:
+This repo includes a reusable schema definition file:
 
-- [`mnexium-records-schema.json`](/Users/mariusndini/Documents/GitHub/Cartly/mnexium-records-schema.json)
+- [`mnexium-records-schema.json`](mnexium-records-schema.json)
 
-It defines:
+Defined tables:
 
 - `receipts`
-- `receipt_items` (with `receipt_id` as `ref:receipts`)
+- `receipt_items` (`receipt_id` is `ref:receipts`)
 
-## Project Structure
+## 🔌 Mnexium Endpoints Used
 
-- `/Cartly/ContentView.swift` UI (Data / Chat / More tabs)
-- `/Cartly/ReceiptCaptureViewModel.swift` app orchestration and error handling
-- `/Cartly/Mnexium/` Mnexium client modules
-  - `MnexiumClient+Chat.swift`
-  - `MnexiumClient+Records.swift`
-  - `MnexiumClient+Transport.swift`
-  - `MnexiumClient+Parsing.swift`
-  - `MnexiumPayloads.swift`
-  - `MnexiumConfiguration.swift`
-- `/Cartly/ReceiptParsingSupport.swift` identity and local key storage
+- `POST /api/v1/chat/completions`
+- `GET /api/v1/chat/history/list`
+- `GET /api/v1/chat/history/read`
+- `POST /api/v1/records/schemas`
+- `GET /api/v1/records/receipts`
+- `POST /api/v1/records/receipts`
+- `DELETE /api/v1/records/receipts/:id`
+- `POST /api/v1/records/receipt_items`
+- `POST /api/v1/records/receipt_items/query`
+- `DELETE /api/v1/records/receipt_items/:id`
 
-## Running The App
+## 🗃 Project Structure
+
+- `Cartly/ContentView.swift`: Data, Chat, and More tabs
+- `Cartly/ReceiptCaptureViewModel.swift`: app orchestration
+- `Cartly/ReceiptParsingSupport.swift`: identity and local key settings
+- `Cartly/Mnexium/`: Mnexium client modules
+- `mnexium-records-schema.json`: canonical records schema for this app
+
+## 🛠 Run Locally
 
 ### Requirements
 
-- Xcode (current toolchain)
-- iOS Simulator/device supported by the project
+- Xcode
+- iOS Simulator or iOS device supported by the project
 
 ### Setup
 
-1. Open `Cartly.xcodeproj` in Xcode.
+1. Open `Cartly.xcodeproj`.
 2. Build and run the `Cartly` scheme.
-3. Configure API keys:
-   - Option A: use app-provided key flow (default)
-   - Option B: open **More** tab and set:
-     - Mnexium API Key
-     - OpenAI API Key
+3. Open **More** tab.
+4. Enter Mnexium API Key and OpenAI API Key (optional).
+5. Save.
+6. Leave Mnexium key empty to fall back to the app-provided key path.
 
-If Mnexium API key is blank in More tab, Cartly falls back to the app-provided key path.
+## 🔐 Security Note
 
-## Security Note
+For demo speed, user-entered keys are stored locally in `UserDefaults`.
+For production, use Keychain for device secrets and keep provider keys server-side.
 
-For demo ergonomics, user-entered keys in the More tab are currently stored locally in `UserDefaults`.
-For hardened production apps, move secrets to Keychain and keep provider keys server-side whenever possible.
+## 🌟 What To Build Next
 
-## Intended Audience
+Cartly covers only part of Mnexium. You can extend this app with:
 
-This repo is designed for developers evaluating Mnexium as an application runtime for AI products.
-It is meant to be read, modified, and reused as a base for your own app.
+- profile-aware personalization
+- claim/truth graph flows
+- stateful agent workflows
+- memory policy tuning
+- semantic search over business records
+
+If you are evaluating Mnexium, this repo is designed to be cloned, modified, and used as a launchpad for your own AI product.
