@@ -1,0 +1,64 @@
+{
+  "schemas": [
+    {
+      "type_name": "receipts",
+      "description": "Receipts storage schema",
+      "schema": {
+        "fields": {
+          "total": {
+            "type": "number",
+            "required": true
+          },
+          "currency": {
+            "type": "string",
+            "required": true
+          },
+          "raw_text": {
+            "type": "string",
+            "required": false
+          },
+          "store_name": {
+            "type": "string",
+            "required": true
+          },
+          "purchased_at": {
+            "type": "datetime",
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "type_name": "receipt_items",
+      "description": "Receipt items storage schema",
+      "schema": {
+        "fields": {
+          "category": {
+            "type": "string",
+            "required": false
+          },
+          "quantity": {
+            "type": "number",
+            "required": false
+          },
+          "item_name": {
+            "type": "string",
+            "required": true
+          },
+          "line_total": {
+            "type": "number",
+            "required": false
+          },
+          "receipt_id": {
+            "type": "ref:receipts",
+            "required": true
+          },
+          "unit_price": {
+            "type": "number",
+            "required": false
+          }
+        }
+      }
+    }
+  ]
+}

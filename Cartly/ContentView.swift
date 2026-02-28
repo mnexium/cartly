@@ -43,7 +43,7 @@ struct ContentView: View {
                 }
                 .tag(RootTab.chat)
 
-            PlaceholderTab()
+            MoreSettingsTab(viewModel: viewModel)
                 .tabItem {
                     Label("More", systemImage: "square.grid.2x2")
                 }
@@ -529,25 +529,69 @@ private struct ChatBubble: View {
     }
 }
 
-private struct PlaceholderTab: View {
+private struct MoreSettingsTab: View {
+    @ObservedObject var viewModel: ReceiptCaptureViewModel
+    @State private var mnexiumAPIKey = ""
+    @State private var openAIAPIKey = ""
+    @State private var isSaving = false
+    @State private var statusMessage: String?
+
     var body: some View {
         NavigationStack {
-            VStack(spacing: 14) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.secondary)
+            Form {
+                Section("API Keys") {
+                    SecureField("Mnexium API Key", text: $mnexiumAPIKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("OpenAI API Key", text: $openAIAPIKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
 
-                Text("More coming soon")
-                    .font(.title3)
-                    .fontWeight(.semibold)
+                    Text("Leave Mnexium API Key empty to use the app-provided keys.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
-                Text("Use this tab later for budgets, goals, or automation.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                Section {
+                    Button(isSaving ? "Saving..." : "Save Keys") {
+                        saveKeys()
+                    }
+                    .disabled(isSaving)
+                }
+
+                Section("Current Source") {
+                    Text(viewModel.usingCustomAPIKeys ? "Using custom API keys" : "Using app-provided API keys")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let statusMessage {
+                    Section {
+                        Text(statusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle("More")
+            .onAppear {
+                mnexiumAPIKey = viewModel.customMnexiumAPIKey
+                openAIAPIKey = viewModel.customOpenAIAPIKey
+            }
+        }
+    }
+
+    private func saveKeys() {
+        isSaving = true
+        statusMessage = nil
+
+        Task {
+            await viewModel.saveAPIKeys(mnexiumAPIKey: mnexiumAPIKey, openAIAPIKey: openAIAPIKey)
+            mnexiumAPIKey = viewModel.customMnexiumAPIKey
+            openAIAPIKey = viewModel.customOpenAIAPIKey
+            statusMessage = viewModel.usingCustomAPIKeys
+                ? "Custom API keys saved."
+                : "Reverted to app-provided API keys."
+            isSaving = false
         }
     }
 }

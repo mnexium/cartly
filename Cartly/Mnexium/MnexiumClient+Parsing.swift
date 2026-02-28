@@ -3,15 +3,15 @@ import OSLog
 
 extension MnexiumClient {
     func extractChatSummaries(from data: Data) throws -> [MnexiumChatSummary] {
-        let rows = try extractRows(from: data)
+        let rows = try extractChatSummaryRows(from: data)
 
         let summaries: [MnexiumChatSummary] = rows.compactMap { item in
-            guard let chatID = string(from: item, key: "chat_id") else {
+            guard let chatID = string(from: item, key: "chat_id") ?? string(from: item, key: "id") else {
                 return nil
             }
 
             let title = string(from: item, key: "title") ?? "Chat \(chatID.prefix(8))"
-            let updatedAt = parseDate(from: item, key: "updated_at")
+            let updatedAt = parseDate(from: item, key: "last_time") ?? parseDate(from: item, key: "updated_at")
             let createdAt = parseDate(from: item, key: "created_at")
             let messageCount = int(from: item, key: "message_count")
 
@@ -32,13 +32,16 @@ extension MnexiumClient {
     }
 
     func extractHistoryMessages(from data: Data) throws -> [MnexiumHistoryMessage] {
-        let rows = try extractRows(from: data)
+        let rows = try extractHistoryRows(from: data)
+        let messages: [MnexiumHistoryMessage] = rows.compactMap { item in
+            let payload = historyMessagePayload(from: item)
+            let role = string(from: payload, key: "role") ?? "assistant"
+            guard let content = extractHistoryContent(from: payload) else { return nil }
 
-        return rows.compactMap { item in
-            let role = string(from: item, key: "role") ?? "assistant"
-            guard let content = extractHistoryContent(from: item) else { return nil }
-
-            let createdAt = parseDate(from: item, key: "created_at")
+            let createdAt = parseDate(from: item, key: "event_time")
+                ?? parseDate(from: payload, key: "event_time")
+                ?? parseDate(from: item, key: "created_at")
+                ?? parseDate(from: payload, key: "created_at")
 
             return MnexiumHistoryMessage(
                 role: role.lowercased(),
@@ -46,6 +49,17 @@ extension MnexiumClient {
                 createdAt: createdAt
             )
         }
+
+        if !rows.isEmpty, messages.isEmpty {
+            if let firstRow = rows.first,
+               let rowData = try? JSONSerialization.data(withJSONObject: firstRow) {
+                logger.error("context=extract_history_messages_dropped rows=\(rows.count) first_row=\(self.responseSnippet(from: rowData), privacy: .public)")
+            } else {
+                logger.error("context=extract_history_messages_dropped rows=\(rows.count) first_row=<unserializable>")
+            }
+        }
+
+        return messages
     }
 
     func extractReceiptRecords(from data: Data) throws -> [MnexiumReceiptRecord] {
@@ -214,20 +228,140 @@ extension MnexiumClient {
         return []
     }
 
+    private func extractChatSummaryRows(from data: Data) throws -> [[String: Any]] {
+        let object = try JSONSerialization.jsonObject(with: data)
+
+        if let rows = object as? [[String: Any]] {
+            return rows
+        }
+
+        guard let json = object as? [String: Any] else {
+            return []
+        }
+
+        if let rows = json["chats"] as? [[String: Any]] {
+            return rows
+        }
+        if let rows = json["data"] as? [[String: Any]] {
+            return rows
+        }
+        if let dataObject = json["data"] as? [String: Any],
+           let rows = dataObject["chats"] as? [[String: Any]] {
+            return rows
+        }
+
+        logger.error("context=extract_chat_summaries_unrecognized response=\(self.responseSnippet(from: data), privacy: .public)")
+        return []
+    }
+
+    private func extractHistoryRows(from data: Data) throws -> [[String: Any]] {
+        let object = try JSONSerialization.jsonObject(with: data)
+
+        if let rows = object as? [[String: Any]] {
+            return rows
+        }
+
+        guard let json = object as? [String: Any] else {
+            return []
+        }
+
+        if let rows = json["messages"] as? [[String: Any]] {
+            return rows
+        }
+        if let rows = json["data"] as? [[String: Any]] {
+            return rows
+        }
+        if let dataObject = json["data"] as? [String: Any] {
+            if let rows = dataObject["messages"] as? [[String: Any]] {
+                return rows
+            }
+            if let chatObject = dataObject["chat"] as? [String: Any],
+               let rows = chatObject["messages"] as? [[String: Any]] {
+                return rows
+            }
+            if let historyObject = dataObject["history"] as? [String: Any],
+               let rows = historyObject["messages"] as? [[String: Any]] {
+                return rows
+            }
+        }
+        if let chatObject = json["chat"] as? [String: Any],
+           let rows = chatObject["messages"] as? [[String: Any]] {
+            return rows
+        }
+        if let historyObject = json["history"] as? [String: Any],
+           let rows = historyObject["messages"] as? [[String: Any]] {
+            return rows
+        }
+
+        logger.error("context=extract_history_unrecognized response=\(self.responseSnippet(from: data), privacy: .public)")
+        return []
+    }
+
     private func extractHistoryContent(from item: [String: Any]) -> String? {
+        if let message = string(from: item, key: "message") {
+            return message
+        }
         if let content = string(from: item, key: "content") {
             return content
         }
 
-        guard let parts = item["content"] as? [[String: Any]] else {
-            return nil
+        if let text = string(from: item, key: "text") {
+            return text
+        }
+        if let outputText = string(from: item, key: "output_text") {
+            return outputText
+        }
+        if let inputText = string(from: item, key: "input_text") {
+            return inputText
         }
 
-        let text = parts.compactMap { string(from: $0, key: "text") }
+        if let contentObject = item["content"] as? [String: Any] {
+            if let text = string(from: contentObject, key: "text") {
+                return text
+            }
+            if let text = string(from: contentObject, key: "output_text") {
+                return text
+            }
+            if let text = string(from: contentObject, key: "input_text") {
+                return text
+            }
+            if let parts = contentObject["parts"] as? [[String: Any]] {
+                let text = parts.compactMap { string(from: $0, key: "text") }
+                    .joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    return text
+                }
+            }
+        }
+
+        if let parts = item["content"] as? [[String: Any]] {
+            let text = parts.compactMap { part in
+                string(from: part, key: "text")
+                    ?? string(from: part, key: "output_text")
+                    ?? string(from: part, key: "input_text")
+            }
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                return text
+            }
+        }
 
-        return text.isEmpty ? nil : text
+        if let parts = item["parts"] as? [[String: Any]] {
+            let text = parts.compactMap { string(from: $0, key: "text") }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                return text
+            }
+        }
+
+        return nil
+    }
+
+    private func historyMessagePayload(from item: [String: Any]) -> [String: Any] {
+        (item["message"] as? [String: Any]) ?? item
     }
 
     private func extractRecordMutations(from value: Any?, tableKey: String) -> [MnexiumRecordMutation] {
@@ -363,7 +497,23 @@ extension MnexiumClient {
 
         let internet = ISO8601DateFormatter()
         internet.formatOptions = [.withInternetDateTime]
-        return internet.date(from: normalized)
+        if let date = internet.date(from: normalized) {
+            return date
+        }
+
+        let sqlFractional = DateFormatter()
+        sqlFractional.locale = Locale(identifier: "en_US_POSIX")
+        sqlFractional.timeZone = TimeZone(secondsFromGMT: 0)
+        sqlFractional.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        if let date = sqlFractional.date(from: normalized) {
+            return date
+        }
+
+        let sql = DateFormatter()
+        sql.locale = Locale(identifier: "en_US_POSIX")
+        sql.timeZone = TimeZone(secondsFromGMT: 0)
+        sql.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return sql.date(from: normalized)
     }
 
     private func parseUnixTimestamp(_ raw: Double) -> Date? {

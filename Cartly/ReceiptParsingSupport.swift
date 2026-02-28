@@ -5,6 +5,11 @@ struct MnexiumIdentity: Sendable {
     let chatID: String
 }
 
+struct MnexiumAPIKeys: Sendable {
+    let mnexiumAPIKey: String
+    let openAIAPIKey: String
+}
+
 final class MnexiumIdentityStore {
     private enum Keys {
         static let subjectID = "cartly.subject_id"
@@ -58,5 +63,46 @@ final class MnexiumIdentityStore {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let uuid = UUID(uuidString: trimmed) else { return nil }
         return uuid.uuidString.lowercased()
+    }
+}
+
+final class MnexiumAPIKeysStore {
+    private enum Keys {
+        static let mnexiumAPIKey = "cartly.custom_mnexium_api_key"
+        static let openAIAPIKey = "cartly.custom_openai_api_key"
+    }
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func currentKeys() -> MnexiumAPIKeys {
+        MnexiumAPIKeys(
+            mnexiumAPIKey: normalized(defaults.string(forKey: Keys.mnexiumAPIKey)),
+            openAIAPIKey: normalized(defaults.string(forKey: Keys.openAIAPIKey))
+        )
+    }
+
+    func save(mnexiumAPIKey: String, openAIAPIKey: String) {
+        let normalizedMnexium = normalized(mnexiumAPIKey)
+        let normalizedOpenAI = normalized(openAIAPIKey)
+
+        if normalizedMnexium.isEmpty {
+            defaults.removeObject(forKey: Keys.mnexiumAPIKey)
+        } else {
+            defaults.set(normalizedMnexium, forKey: Keys.mnexiumAPIKey)
+        }
+
+        if normalizedOpenAI.isEmpty {
+            defaults.removeObject(forKey: Keys.openAIAPIKey)
+        } else {
+            defaults.set(normalizedOpenAI, forKey: Keys.openAIAPIKey)
+        }
+    }
+
+    private func normalized(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }

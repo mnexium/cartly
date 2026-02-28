@@ -32,18 +32,33 @@ final class ReceiptCaptureViewModel: ObservableObject {
     @Published var receiptItemsByReceiptID: [String: [ReceiptItemEntry]] = [:]
     @Published var loadingReceiptItemIDs: Set<String> = []
     @Published var receiptItemsLoadMessages: [String: String] = [:]
+    @Published var customMnexiumAPIKey = ""
+    @Published var customOpenAIAPIKey = ""
 
     private let identityStore: MnexiumIdentityStore
+    private let apiKeysStore: MnexiumAPIKeysStore
     private let secretsService: LambdaSecretsService?
     private var mnexiumClient: MnexiumClient?
     private let logger = Logger(subsystem: "com.marius.Cartly", category: "AppErrors")
 
     init(
         identityStore: MnexiumIdentityStore? = nil,
+        apiKeysStore: MnexiumAPIKeysStore? = nil,
         secretsService: LambdaSecretsService? = nil
     ) {
         self.identityStore = identityStore ?? MnexiumIdentityStore()
+        self.apiKeysStore = apiKeysStore ?? MnexiumAPIKeysStore()
         self.secretsService = secretsService ?? (try? LambdaSecretsService())
+        let persistedKeys = self.apiKeysStore.currentKeys()
+        self.customMnexiumAPIKey = persistedKeys.mnexiumAPIKey
+        self.customOpenAIAPIKey = persistedKeys.openAIAPIKey
+
+        if configureClientFromCustomKeysIfPresent() {
+            Task {
+                await refreshReceipts(force: true)
+            }
+            return
+        }
 
         if let cachedSecrets = self.secretsService?.cachedSecrets(),
            let configuration = MnexiumConfiguration.fromRemoteKeys(
@@ -59,6 +74,11 @@ final class ReceiptCaptureViewModel: ObservableObject {
     }
 
     private func refreshSecretsFromRemote() async {
+        if configureClientFromCustomKeysIfPresent() {
+            await refreshReceipts(force: true)
+            return
+        }
+
         if let secretsService {
             do {
                 let secrets = try await secretsService.fetchAndCacheSecrets()
@@ -86,6 +106,26 @@ final class ReceiptCaptureViewModel: ObservableObject {
         } else {
             self.mnexiumClient = nil
         }
+    }
+
+    var usingCustomAPIKeys: Bool {
+        !customMnexiumAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func saveAPIKeys(mnexiumAPIKey: String, openAIAPIKey: String) async {
+        let normalizedMnexium = mnexiumAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedOpenAI = openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        apiKeysStore.save(mnexiumAPIKey: normalizedMnexium, openAIAPIKey: normalizedOpenAI)
+        customMnexiumAPIKey = normalizedMnexium
+        customOpenAIAPIKey = normalizedOpenAI
+
+        if configureClientFromCustomKeysIfPresent() {
+            await refreshReceipts(force: true)
+            return
+        }
+
+        await refreshSecretsFromRemote()
     }
 
     func captureReceipt(from image: UIImage) async {
@@ -568,5 +608,19 @@ final class ReceiptCaptureViewModel: ObservableObject {
             retryable: false,
             userMessage: fallbackMessage
         )
+    }
+
+    private func configureClientFromCustomKeysIfPresent() -> Bool {
+        let normalizedMnexium = customMnexiumAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedMnexium.isEmpty,
+              let configuration = MnexiumConfiguration.fromRemoteKeys(
+                mnexiumApiKey: normalizedMnexium,
+                openAIKey: customOpenAIAPIKey
+              ) else {
+            return false
+        }
+
+        mnexiumClient = MnexiumClient(configuration: configuration)
+        return true
     }
 }
